@@ -1,0 +1,82 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ddz-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-change-me-in-env}
+      MYSQL_DATABASE: doudizhu
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      # 宿主端口默认 3307：本机已安装 MySQL80 占用 3306，改为映射宿主的 3307 避免冲突。
+      # 容器内仍是 3306，backend 容器通过服务名 mysql:3306 连接，不受影响。
+      - "${MYSQL_PORT:-3307}:3306"
+    volumes:
+      - ddz-mysql-data:/var/lib/mysql
+      # 首次启动时自动执行 DDL（schema.sql 是幂等的，重复执行安全）
+      - ../backend/src/main/resources/db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${DB_PASSWORD:-change-me-in-env}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: ddz-redis
+    # 与本地开发约定一致：AOF 持久化 + 256MB 内存上限 + LRU 淘汰
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - ddz-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+    container_name: ddz-backend
+    environment:
+      DB_HOST: mysql
+      REDIS_HOST: redis
+      DB_PASSWORD: ${DB_PASSWORD:-change-me-in-env}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8080:8080"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: ddz-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # 需先在 frontend 执行 npm run build
+      - ../frontend/dist:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+
+volumes:
+  ddz-mysql-data:
+  ddz-redis-data:
